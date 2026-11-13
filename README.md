@@ -54,7 +54,7 @@ TheReach 不是独立浏览器框架。浏览器补充会定位已有 Agent Reac
 ## 获取与安装
 
 ```sh
-git clone https://github.com/Riras-ainq/Project0.git TheReach
+git clone https://github.com/Riras-ainq/The-Reach.git TheReach
 cd TheReach
 python3 thereach/scripts/collect.py doctor
 ```
