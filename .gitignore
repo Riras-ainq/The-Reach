@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+.thereach/
+outputs/
+config.local.json
+.env
+.env.*
+.DS_Store
