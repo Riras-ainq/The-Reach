@@ -2,11 +2,21 @@
 
 **让 Agent 按实际取得的内容，读取六个平台并交付可追溯的 JSON 与 Markdown。**
 
-TheReach 是面向 Codex、Hermes 等支持 `SKILL.md` 的 Agent 的只读采集技能，覆盖抖音、小红书、B站、微信公众号、YouTube 和 X。它复用已有 Agent Reach、OpenCLI 与 yt-dlp，在统一入口中处理分享链接、有限搜索、正文、字幕、评论样本和本地图片识别。
+TheReach 是面向 Codex、Hermes 等支持 `SKILL.md` 的 Agent 的只读采集技能，覆盖抖音、小红书、B站、微信公众号、YouTube 和 X。它复用已有 Agent Reach、OpenCLI 与 yt-dlp，在统一入口中处理分享链接、有限搜索、正文、字幕、评论样本、本地图片识别与 Apple 本机中文转写。
 
 项目名为 **TheReach**，技能标识为 **`thereach`**。基础调度使用 Python 标准库；平台能力依赖外部工具和你本人的有效登录，不提供跨机器通用的登录状态。
 
 [技能入口](thereach/SKILL.md) · [配置与接口](thereach/references/configuration.md) · [能力矩阵](thereach/references/capabilities.md) · [依赖与致谢](thereach/references/github-research.md) · [更新记录](CHANGELOG.md)
+
+## 2026-11-15 更新：无字幕 B站视频本机转写
+
+现在可用一条命令按“字幕优先 → 浏览器独立音轨 → Apple SpeechAnalyzer”取得带时间戳的原始识别稿：
+
+```sh
+python3 thereach/scripts/collect.py --deadline 900 extract 'B站视频链接' --transcribe --output outputs/transcript
+```
+
+原生路线需要 macOS 26+、支持 SpeechAnalyzer 的 Swift/SDK、已安装的 zh_CN 语音资源及可用的现有浏览器会话。不上传音频、不调用付费模型、不自动下载模型；`doctor.transcription.apple_native.ready` 可检查资源状态。有字幕则跳过 ASR。数字、人名、术语仍需对照原音频校对，不会用 LLM 静默改写原始稿。
 
 ## 能做什么
 
@@ -46,8 +56,8 @@ TheReach 是面向 Codex、Hermes 等支持 `SKILL.md` 的 Agent 的只读采集
 | [OpenCLI](https://github.com/jackwener/OpenCLI) | 复用 Browser Bridge 与只读适配器 | 已验证基线为 1.8.7，需要对应浏览器/Bridge 正常工作 |
 | [yt-dlp](https://github.com/yt-dlp/yt-dlp) | YouTube 元信息与评论 | 复用已有安装；发现工具不代表平台访问已通过 |
 | `china-read` | 抖音站内搜索 | 原开发环境的本机补充命令，**不是本仓库附带工具**；没有它时仅能尝试站外索引 |
-| Swift / Vision | 本机 OCR 与图片标签分类 | macOS 系统能力，首次编译可能较慢 |
-| FFmpeg、ASR服务 | 可选语音转录 | 只在明确授权与配置后使用，不自动下载本地大模型 |
+| Swift / Vision / Speech | 本机 OCR、图片标签、中文 ASR | ASR 需要 macOS 26+、可用 SDK 和已安装中文语音资源；不自动下载模型 |
+| 外部 ASR 服务 | 可选云端语音转录 | 配置并授权后使用，原生不可用时不会自动切换云端 |
 
 TheReach 不是独立浏览器框架。浏览器补充会定位已有 Agent Reach 的 Python，并调用其 Browser Bridge / OpenCLI 内部模块；因此，上游升级后需要重新验收，不能承诺跨版本兼容。缺少依赖会返回 `NEED_SETUP` 等明确状态。
 
@@ -154,7 +164,7 @@ python3 thereach/scripts/collect.py --config config.local.json doctor
 
 | 配置 | 默认值 | 含义 |
 |---|---:|---|
-| `timeout` | 25 秒 | 单次网络操作或子进程上限 |
+| `timeout` | 25 秒 | 普通网络操作或子进程上限；本机 ASR 使用剩余总 deadline |
 | `deadline` | 100 秒 | 整个任务时间预算 |
 | `max_calls` | 12 | 外层调用预算 |
 | `max_paid_calls` | 0 | 付费/模型调用预算，默认不允许 |
@@ -162,7 +172,8 @@ python3 thereach/scripts/collect.py --config config.local.json doctor
 | `cache_ttl` | 3600 秒 | 内容缓存有效期 |
 | `max_comments` | 20 | 评论输出样本上限 |
 | `max_images` | 3 | 单条内容的图片处理上限 |
-| `max_media_bytes` | 4,000,000 | 单个本地素材或直连图片大小上限 |
+| `max_media_bytes` | 64,000,000 | 单个本地素材或直连媒体大小上限 |
+| `max_bytes` | 80,000,000 | 整个任务输入数据大小上限 |
 
 配置路径可由 `THEREACH_CONFIG` 指定，状态目录可由 `THEREACH_STATE` 或 `--state-dir` 指定。相对 `state_dir` 相对配置文件解析；未提供配置时默认位于仓库 `.thereach/`，不依赖调用者 cwd。多个 Agent 应共用同一个状态目录，不要另建目录绕过停止状态。
 
@@ -170,10 +181,11 @@ python3 thereach/scripts/collect.py --config config.local.json doctor
 
 - YouTube Data API：配置 `youtube_api: true`，由环境提供 `THEREACH_YOUTUBE_KEY`；消耗项目配额，不提供任意视频字幕下载权限。
 - X API：配置 `x_api: true` 与 `THEREACH_X_BEARER`，还需 `--allow-paid` 和正的 `max_paid_calls`；受账号权限、额度与计费规则约束。
-- ASR / 外部视觉：配置获授权的命令适配器，可能上传素材；必须显式授权并提供调用预算。没有字幕不会自动上传音频。
+- Apple 本机 ASR：B站和本地文件默认使用已安装的系统中文模型，显式 `--transcribe` 才运行，无需 `--allow-paid`。
+- ASR / 外部视觉：显式配置 `transcribe_command` 时优先外部适配器；可能上传素材，仍必须授权并提供调用预算。没有字幕不会自动上传音频。
 - 原生 AI / MCP：按动作在已知原文样本上执行 `probe`，验证 URL、文本与范围后才进入自动选路。不把元宝/豆包 App 的功能当作任意原文 API 权限，也不把模型总结当原文。
 
-完整 JSON 契约、`probe` 用法及配置说明见 [configuration.md](thereach/references/configuration.md)。以上可选通道尚未完成真实线上验收。
+完整 JSON 契约、`probe` 用法及配置说明见 [configuration.md](thereach/references/configuration.md)。其中 Apple 本机 ASR 已通过一个约 21 分钟的 B站样本；云端 ASR、原生 AI 与官方 API 不宣称已完成线上验收。
 
 ## 输出与状态
 
@@ -187,6 +199,7 @@ python3 thereach/scripts/collect.py --config config.local.json doctor
 | `items` | 实际返回的内容条目 |
 | `text_scope` | body、description、search_hit、subtitle、comment 等文本范围 |
 | `coverage` | 各组件取得、缺失、未请求或失败的状态 |
+| `transcript_segments` / `transcript_details` | 原生 ASR 时间戳、引擎、音频来源和缓存信息 |
 | `provenance` | 实际使用的后端和动作 |
 | `warnings` | 有限样本、降级、缺失或截断说明 |
 | `platform_outcomes` | 联合搜索逐个平台的结果 |
@@ -223,7 +236,7 @@ python3 thereach/scripts/collect.py --help
 python3 scripts/install_skill.py --check
 ```
 
-真实 ASR、官方 YouTube/X API、全平台远端图片完整链路、抖音图文线上样本及B站多P字幕仍未完成线上验收。私人平台数据与开发机验证原件不会放入公开仓库。
+本次在 Python 3.9.6 / 3.14.9 各通过 72 项离线测试；一个约 21 分钟的 B站样本取得独立音轨并完成 Apple 本机中文转写，原生识别约 13 秒，重复调用复用缓存。样本时长匹配不保证每个词准确，不构成跨机器速度保证。云端 ASR、官方 YouTube/X API、全平台远端图片完整链路、抖音图文线上样本及B站多P字幕仍未完成线上验收。私人平台数据与开发机验证原件不会放入公开仓库。
 
 ```text
 TheReach/

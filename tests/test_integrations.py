@@ -88,6 +88,31 @@ class IntegrationTests(unittest.TestCase):
             rows = self.c.p.reach('x', 'comments', target, 3)
         self.assertEqual(rows, [])
 
+    def test_xhs_search_enrichment_preserves_signature_but_export_hides_it(self):
+        signed = 'https://www.xiaohongshu.com/search_result/abc?xsec_token=fixture-only'
+        def upstream(argv, *args, **kwargs):
+            action, target = argv[2:4]
+            if action == 'search':
+                return {'items': [{'url': signed, 'title': 'fixture note'}]}
+            self.assertEqual(target, signed)
+            return {'items': [{'url': signed, 'text': 'fixture ' + action}]}
+        with patch.object(self.r, 'command_json', side_effect=upstream) as call:
+            rows, outcomes = self.c.search('fixture', ['xiaohongshu'], limit=1, enrich=1, comments=True)
+        self.assertEqual(call.call_count, 3)
+        self.assertEqual(outcomes['xiaohongshu']['status'], 'ok')
+        self.assertEqual(rows[0]['coverage']['comments'], 'available')
+        from sc_collector import public_result
+        self.assertNotIn('fixture-only', json.dumps(public_result(rows)))
+
+    def test_xhs_unsigned_export_url_is_input_error_without_network_or_fallback(self):
+        for action in ('read', 'comments'):
+            with self.subTest(action=action), patch.object(self.r, 'command_json', side_effect=AssertionError('no network')):
+                with self.assertRaises(Failure) as caught:
+                    self.c.operation('xiaohongshu', action, 'https://www.xiaohongshu.com/explore/abc')
+                self.assertEqual(caught.exception.code, 'BAD_INPUT')
+                self.assertIn('xsec_token', caught.exception.message)
+                self.assertIsNone(self.r.state.inspection('xiaohongshu')['gate'])
+
     def test_missing_subtitles_can_transcribe(self):
         url = 'https://www.youtube.com/watch?v=abcdefghijk'
         def operation(platform, action, target, limit=5):
@@ -132,7 +157,17 @@ class IntegrationTests(unittest.TestCase):
         installer = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(installer)
         roots = [self.root / 'codex/skills', self.root / 'hermes/skills']
+        roots[0].mkdir(parents=True)
+        legacy = roots[0] / 'social-collector'
+        legacy.symlink_to(self.root / 'missing/social-collector')
+        preview = installer.install(roots, check=True)
+        self.assertTrue(legacy.is_symlink())
+        self.assertFalse((roots[0] / 'thereach').is_symlink())
+        self.assertEqual(preview['entries'][0]['stale_legacy'], str(legacy))
         result = installer.install(roots)
+        self.assertFalse(legacy.is_symlink())
+        self.assertTrue((roots[0] / 'thereach/SKILL.md').is_file())
+        self.assertEqual(installer.install(roots)['entries'][0]['status'], 'already_linked')
         self.assertTrue(result['ok'])
         self.assertEqual((roots[0] / 'thereach').resolve(), (roots[1] / 'thereach').resolve())
         collision = self.root / 'existing/skills/thereach'

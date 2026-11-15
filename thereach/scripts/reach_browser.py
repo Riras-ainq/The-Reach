@@ -69,6 +69,21 @@ def bilibili_rows(rows, target, action, limit):
     return result
 
 
+def browser_failure(exc, target, action):
+    """Interpret known subtitle hints without exposing arbitrary upstream output."""
+    failure = exc if isinstance(exc, Failure) else classify_text(str(exc))
+    code = getattr(exc, 'code', failure.code)
+    # OpenCLI puts EMPTY_RESULT's explanation in hint, not in message.
+    # Agent Reach currently maps this to UPSTREAM_BROKEN; inspect both fields.
+    hint = str(getattr(exc, 'hint', '') or '')
+    if (platform_for(target) == 'bilibili' and action == 'subtitle'
+            and code in ('UPSTREAM_BROKEN', 'EMPTY_RESULT')
+            and any(text in str(exc) + '\n' + hint for text in (
+                '此视频没有发现外挂或智能字幕', '字幕文件中没有字幕片段'))):
+        return Failure('NOT_FOUND', '当前会话未发现该视频可用的字幕轨或字幕片段；不代表没有画面内嵌字幕。可使用已配置并获授权的音频转写服务')
+    return Failure(code, failure.message, failure.retry_after)
+
+
 def read(target, timeout, action='read', limit=20):
     platform = platform_for(target)
     if platform == 'bilibili' and action in ('subtitle', 'comments'):
@@ -140,6 +155,38 @@ def read(target, timeout, action='read', limit=20):
     raise failure
 
 
+def audio_info(target, timeout):
+    if platform_for(target) != 'bilibili':
+        raise Failure('BAD_INPUT', '浏览器音轨目前只支持 B站')
+    from agent_reach.runtime import browser, bridge, tools
+    from agent_reach.runtime.browser_binding import query_slot
+    from agent_reach.runtime.run import run_cmd
+    tools.extend_path()
+    with query_slot('bilibili'):
+        browser.ensure_running()
+        profile = browser.bound_context()
+        if not profile or not bridge.require_compatible():
+            raise Failure('NEED_SETUP', '现有专用浏览器 Bridge 未连接')
+        argv, _ = bridge.launch_spec()
+        root = Path(argv[-1]).parent
+        page = root / 'browser/page.js'
+        utils = root.parent.parent / 'clis/bilibili/utils.js'
+        if not page.is_file() or not utils.is_file():
+            raise Failure('NEED_SETUP', '现有 OpenCLI 缺少 Page/WBI 工具模块')
+        browser.touch()
+        try:
+            output = run_cmd([argv[0], str(Path(__file__).with_name('bilibili_audio.mjs')),
+                page.as_uri(), utils.as_uri(), profile, canonical(target)], timeout=timeout)
+        except Exception as exc:
+            # run_cmd attaches the structured JSON envelope to failed commands.
+            output = getattr(exc, 'stdout', '')
+            if not output:
+                raise
+        data = json.loads(output)
+        browser.save_session()
+        return data
+
+
 def open_login(target):
     platform_for(target)
     from agent_reach.runtime import browser
@@ -154,20 +201,22 @@ def main():
     p = argparse.ArgumentParser()
     p.add_argument('target')
     p.add_argument('--timeout', type=float, default=25)
-    p.add_argument('--action', choices=('read', 'subtitle', 'comments', 'login'), default='read')
+    p.add_argument('--action', choices=('read', 'subtitle', 'comments', 'audio', 'login'), default='read')
     p.add_argument('--limit', type=int, default=20)
     a = p.parse_args()
     try:
-        data = open_login(a.target) if a.action == 'login' else {'ok': True, 'items': read(a.target, a.timeout, a.action, a.limit)}
+        if a.action == 'login':
+            data = open_login(a.target)
+        elif a.action == 'audio':
+            data = audio_info(a.target, a.timeout)
+        else:
+            data = {'ok': True, 'items': read(a.target, a.timeout, a.action, a.limit)}
         print(json.dumps(data, ensure_ascii=False))
-        return 0
+        return 0 if data.get('ok') else 2
     except Exception as exc:
         # Never echo upstream JS/HTML/session data in diagnostics.
-        failure = exc if isinstance(exc, Failure) else classify_text(str(exc))
-        code = getattr(exc, 'code', failure.code)
-        if code == 'UPSTREAM_BROKEN' and '此视频没有发现外挂或智能字幕' in str(exc):
-            code = 'NOT_FOUND'
-        print(json.dumps({'ok': False, 'error': {'code': code, 'message': failure.message}}, ensure_ascii=False))
+        failure = browser_failure(exc, a.target, a.action)
+        print(json.dumps({'ok': False, 'error': failure.as_dict()}, ensure_ascii=False))
         return 2
 
 

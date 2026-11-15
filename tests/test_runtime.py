@@ -41,6 +41,14 @@ class RuntimeTests(unittest.TestCase):
             self.r.command([sys.executable, '-c', 'print("x" * 10000)'])
         self.assertEqual(caught.exception.code, 'OUTPUT_LIMIT')
 
+    def test_native_timeout_can_extend_request_but_not_total_deadline(self):
+        self.config['timeout'] = .02
+        self.assertEqual(self.r.command([sys.executable, '-c', 'import time;time.sleep(.05);print("ok")'], timeout=1).strip(), 'ok')
+        self.r.end = time.monotonic() + .1
+        with self.assertRaises(Failure) as caught:
+            self.r.command([sys.executable, '-c', 'import time;time.sleep(10)'], timeout=30)
+        self.assertEqual(caught.exception.code, 'TIMEOUT')
+
     def test_no_retry_and_call_budget(self):
         self.config['max_calls'] = 1
         self.r.command([sys.executable, '-c', 'print("ok")'])
@@ -60,6 +68,18 @@ class RuntimeTests(unittest.TestCase):
         with self.assertRaises(Failure) as caught:
             self.r.command_json([sys.executable, '-c', code])
         self.assertEqual(caught.exception.code, 'PLATFORM_BLOCKED')
+
+    def test_structured_429_without_retry_after_has_fifteen_minute_cooldown(self):
+        for exit_code in (0, 1):
+            code = 'import json,sys;print(json.dumps({"ok":False,"error":{"code":"RATE_LIMITED","message":"HTTP 429","retry_after_seconds":0}}));sys.exit(' + str(exit_code) + ')'
+            with self.subTest(exit_code=exit_code), patch('sc_core.time.time', return_value=1000):
+                with self.assertRaises(Failure) as caught:
+                    with self.r.attempt('youtube', 'fixture', 'subtitle'):
+                        self.r.command_json([sys.executable, '-c', code])
+                self.assertEqual(caught.exception.retry_after, 900)
+                self.assertEqual(self.r.state.inspection('youtube')['gate']['until_time'], 1900)
+                self.r.state.db.execute('DELETE FROM gates')
+                self.r.state.db.commit()
 
     def test_ssrf_and_cross_platform_redirect_rejected(self):
         for url in ('https://127.0.0.1/a', 'https://evil.test/a'):

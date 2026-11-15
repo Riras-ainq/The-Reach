@@ -24,9 +24,9 @@ TERMINAL = {'PLATFORM_BLOCKED', 'RATE_LIMITED', 'NEED_LOGIN', 'PERMISSION_DENIED
 STOP = TERMINAL | {'BAD_INPUT', 'NOT_FOUND', 'BUDGET_EXCEEDED', 'OUTPUT_LIMIT', 'LOCAL_PERMISSION'}
 DEFAULTS = {
     'timeout': 25, 'deadline': 100, 'max_calls': 12, 'max_paid_calls': 0,
-    'max_bytes': 8_000_000, 'max_output_chars': 100_000, 'cache_ttl': 3600,
+    'max_bytes': 80_000_000, 'max_output_chars': 100_000, 'cache_ttl': 3600,
     'failure_ttl': 120, 'min_interval': 10, 'max_redirects': 5,
-    'max_images': 3, 'max_comments': 20, 'max_media_bytes': 4_000_000,
+    'max_images': 3, 'max_comments': 20, 'max_media_bytes': 64_000_000,
     'agent_reach': 'agent-reach', 'china_read': 'china-read',
     'youtube_api': False, 'x_api': False, 'connectors': {},
 }
@@ -34,7 +34,8 @@ DEFAULTS = {
 
 class Failure(Exception):
     def __init__(self, code, message='', retry_after=0):
-        self.code, self.message, self.retry_after = code, str(message), retry_after
+        self.code, self.message = code, str(message)
+        self.retry_after = retry_after or (900 if code == 'RATE_LIMITED' else 0)
         super().__init__(self.message)
 
     def as_dict(self):

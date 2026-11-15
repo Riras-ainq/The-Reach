@@ -53,6 +53,69 @@ class CollectorTests(unittest.TestCase):
         self.assertEqual(values[0]['text'], '真实测试正文')
         self.assertEqual([x['status'] for x in self.r.attempts], ['NETWORK_ERROR', 'ok'])
 
+    def test_all_routes_failed_keeps_specific_error_and_failure_cache(self):
+        def broken(*args):
+            raise Failure('UPSTREAM_BROKEN', 'specific upstream diagnostic')
+        with patch.object(self.c.p, 'routes', return_value=[('fixture', broken)]):
+            with self.assertRaises(Failure) as caught:
+                self.c.operation('youtube', 'read', self.url)
+        self.assertIn('specific upstream diagnostic', caught.exception.message)
+        with patch.object(self.c.p, 'routes', side_effect=AssertionError('must use failure cache')):
+            with self.assertRaises(Failure) as cached:
+                self.c.operation('youtube', 'read', self.url)
+        self.assertIn('specific upstream diagnostic', cached.exception.message)
+
+    def test_missing_subtitle_skips_redundant_route_but_allows_asr(self):
+        def first(platform, action, *args):
+            if action == 'read':
+                return [item(self.url, text='简介', scope='description')]
+            raise Failure('NOT_FOUND', '当前会话未发现字幕')
+        def redundant(*args):
+            self.fail('no subtitle track should not trigger another subtitle route')
+        with patch.object(self.c.p, 'routes', return_value=[('first', first), ('redundant', redundant)]):
+            with patch.object(self.c, 'transcribe', return_value='测试转写原文') as asr:
+                row = self.c.extract(self.url, subtitles=True, transcribe=True)[0]
+        self.assertEqual(row['coverage']['subtitles'], 'NOT_FOUND')
+        self.assertEqual(row['coverage']['transcript'], 'available')
+        asr.assert_called_once()
+
+    def test_bilibili_asr_uses_installed_native_model_without_paid_flag(self):
+        result = {'text': 'fixture', 'engine': 'apple-speech-analyzer'}
+        with patch.object(self.c.native, 'transcribe', return_value=result) as native:
+            self.assertEqual(self.c.transcribe('https://www.bilibili.com/video/BV1LpNd6YEta', 'bilibili'), result)
+        native.assert_called_once()
+        self.assertEqual(self.r.paid_calls, 0)
+
+    def test_external_asr_still_requires_authorization(self):
+        self.config['transcribe_command'] = ['fixture-only']
+        with patch.object(self.r, 'command_json', side_effect=AssertionError('no service should run')):
+            with self.assertRaises(Failure) as caught:
+                self.c.transcribe('https://www.bilibili.com/video/BV1LpNd6YEta', 'bilibili')
+        self.assertEqual(caught.exception.code, 'NEED_SETUP')
+        self.assertIn('--allow-paid', caught.exception.message)
+        self.assertEqual(self.r.calls, 0)
+
+    def test_title_only_search_is_verified_as_hits_in_summary_and_status(self):
+        row = item(self.url, title='fixture hit', scope='search_hit')
+        argv = ['--state-dir', self.directory.name, 'check', 'youtube', 'search', 'fixture',
+                '--output', str(Path(self.directory.name) / 'check')]
+        with patch('sc_providers.Providers.routes', return_value=[('fixture', lambda *a: [row])]):
+            with contextlib.redirect_stdout(io.StringIO()) as output:
+                self.assertEqual(main(argv), 0)
+        summary = json.loads(output.getvalue())
+        self.assertTrue(summary['verification']['action_satisfied'])
+        self.assertFalse(summary['verification']['content_returned'])
+        self.assertEqual(summary['verification']['search_hits_returned'], 1)
+        self.assertEqual(summary['preview'][0]['text_scope'], 'search_hit')
+        self.assertEqual(platform_status(self.c)['youtube']['checks']['search']['status'], 'hits_returned')
+
+    def test_historical_title_only_search_is_not_displayed_as_failed(self):
+        self.r.state.record_check('xiaohongshu', 'search',
+            {'status': 'empty_text', 'count': 3, 'text_chars': 0, 'scope': ['search_hit']})
+        result = platform_status(self.c)['xiaohongshu']['checks']['search']
+        self.assertEqual(result['status'], 'hits_returned')
+        self.assertEqual(result['text_chars'], 0)
+
     def test_success_cached_across_invocations(self):
         def backend(*args):
             return [item(self.url, text='fixture only')]

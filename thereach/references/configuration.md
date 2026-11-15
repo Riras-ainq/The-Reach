@@ -12,9 +12,9 @@ Hermes 独立 profile 用 `--hermes-dir <profile>/skills` 安装；Docker 需用
 
 默认内容缓存 1 小时，普通失败缓存 2 分钟；验证码、登录与权限限制持久停止，人工确认后显式恢复；429 默认至少冷却 15 分钟，并尊重更长 Retry-After。BUSY 至少冷却 1 分钟。同平台调用间隔 10 秒、一个租约；不同进程通过 SQLite 互斥，租约超时自动释放。正常调用无重试循环，只有允许的不同路线有限降级。
 
-`timeout` 为单次子进程/网络操作上限；`deadline` 是整个任务上限；`max_calls` 统计调度器的 HTTP 请求和子进程调用，**不能逐个计算 Agent Reach、yt-dlp 或连接器内部的请求**。子进程受外层超时、输出字节限制；直接 yt-dlp 路线已关闭自身重试。上游自己的浏览器管理和内部降级仍受上游策略控制。本工具不宣称精确计量供应商 Token 或费用，只限制外层付费/模型调用次数。
+`timeout` 为普通单次子进程/网络操作上限；Apple 原生语音检查及转写允许使用剩余总 deadline；`deadline` 是整个任务上限；`max_calls` 统计调度器的 HTTP 请求和子进程调用，**不能逐个计算 Agent Reach、yt-dlp 或连接器内部的请求**。子进程受外层超时、输出字节限制；直接 yt-dlp 路线已关闭自身重试。上游自己的浏览器管理和内部降级仍受上游策略控制。本工具不宣称精确计量供应商 Token 或费用，只限制外层付费/模型调用次数。
 
-`max_bytes` 限制本进程接收/读取的输入数据，`max_media_bytes` 限制单个本地素材/直连图片；不控制上游转录工具内部临时下载量。`max_output_chars` 限制最终结构化输出；截断时明确标记，缓存保留原始取得文本。stderr/stdout 有界，错误日志不输出原始网页和命令凭据。
+`max_bytes` 限制本进程接收/读取的输入数据，`max_media_bytes` 限制单个本地素材/直连媒体（含 B站音轨）；不控制上游转录工具内部临时下载量。`max_output_chars` 限制最终结构化输出；截断时明确标记，缓存保留原始取得文本。stderr/stdout 有界，错误日志不输出原始网页和命令凭据。
 
 缓存目录 0700，SQLite 0600，输出默认私有文件。缓存可能保留小红书签名访问 URL 以供 enrich；导出移除内部 `_access_url`，并过滤常见密钥参数。不要提交缓存、真实配置、Cookie 或平台素材。输出仍可能含用户内容中的个人信息，应按用途分享。
 
@@ -41,7 +41,7 @@ python3 thereach/scripts/collect.py check bilibili subtitle '视频链接' --out
 
 所有调用应使用同一个共享状态目录；不要另建状态目录绕过停止记录。
 
-`--transcribe` 在本次字幕已取得时跳过 ASR；显式转录且无字幕时才调用。语音转录只有 YouTube 的 Agent Reach 路线开箱提供适配；其他平台配置获授权的 `transcribe_command`。本地已有音视频可用 `media <文件> --mode transcribe`，服务同样需授权及额度。默认不会下载本地模型。
+`--transcribe` 对 B站/YouTube 自动优先查字幕，有字幕则跳过 ASR。B站无字幕且没有配置外部命令时，复用浏览器获取最低码率独立 DASH 音轨，再用 Apple SpeechAnalyzer 本机中文转写；本地文件用 `media <文件> --mode transcribe` 走相同引擎。原生路径无需 --allow-paid，不上传、不自动下载模型；资源未安装则明确返回 NEED_SETUP，不自动切云端。YouTube 保留原有需授权的转写路线。自定义 transcribe_command 仍优先外部服务并要求上传/预算授权。
 
 输出基名生成 `.json` 和 `.md`，已有文件默认拒绝覆盖；只有显式 `--overwrite` 才覆盖。退出码 0 表示交付 complete/partial，2 表示失败；自动化应同时检查 `status` 和 `coverage`。搜索中失败平台分别列在 `platform_outcomes`，不会虚构零结果成功。
 
@@ -102,3 +102,21 @@ python3 thereach/scripts/collect.py --config config.local.json --allow-paid prob
 | RATE_LIMITED / BUSY | 遵守冷却或等待其他调用结束，不切换后端 |
 | NETWORK_ERROR / TIMEOUT | 一次有限降级，失败短期缓存；不假定必须登录 |
 | BUDGET_EXCEEDED / OUTPUT_LIMIT | 保留已得结果，调整任务范围；不默认提高额度 |
+
+
+## Apple 本机中文转写
+
+依赖 macOS 26+、可编译 SpeechAnalyzer 的 Swift/SDK、已安装的 zh_CN 资源，以及原有 Agent Reach / OpenCLI 浏览器环境。先看 doctor.transcription.apple_native.ready；这只表示本地资源就绪，不代表任意视频可读。
+
+```sh
+python3 thereach/scripts/collect.py --deadline 900 extract 'B站视频链接' --transcribe --output outputs/native-asr
+python3 thereach/scripts/collect.py --deadline 900 media '/绝对路径/音频.m4a' --mode transcribe --output outputs/local-asr
+```
+
+字幕缺失提示从 OpenCLI 的 hint 读取，明确返回 NOT_FOUND；短缓存 2 分钟，不重复另一字幕后端。有字幕则跳过音轨获取。验证码、登录、权限、429 和 BUSY 继续停止平台，不换后端绕过。付费/专属、试看、分P身份或音频时长不符时拒收，不下载完整视频作为自动后备。
+
+仅允许 bilivideo.com/bilivideo.cn 的 HTTPS 媒体，并检查公网地址、估算及实际下载大小。当前默认 max_media_bytes=64,000,000，max_bytes=80,000,000，可通过配置收紧；不会自动提高预算。本机语音处理仍受整个任务 deadline 限制。
+
+音轨在 .thereach/audio/ 按内容哈希缓存；索引及原始 ASR 默认缓存一小时，缓存到期不自动删除素材。签名 CDN URL 不缓存、不导出；不读取或导出 Cookie。JSON 保留 transcript 文本，并增加 transcript_segments（start/end/text）及 transcript_details（引擎、语言、来源、时长、哈希、缓存状态）；Markdown 显示时间戳和未校对声明。
+
+ASR 是原始识别稿，数字、人名、术语需校对，不能冒充作者提供的准确文案，也不能由转载稿或模型总结替代。即使 ASR 成功，无平台字幕时整体 status 仍可能是 partial，应以 coverage.transcript 判断转写是否取得。

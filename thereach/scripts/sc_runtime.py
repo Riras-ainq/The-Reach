@@ -20,7 +20,7 @@ from urllib.request import HTTPRedirectHandler, Request, build_opener
 from sc_core import DEFAULTS, DOMAINS, Failure, State, classify_text, host_matches, platform_for
 
 EXTRA_HOSTS = ('www.googleapis.com', 'api.x.com', 'googlevideo.com', 'ytimg.com',
-               'hdslb.com', 'bilivideo.com', 'qpic.cn', 'qlogo.cn', 'xhscdn.com',
+               'hdslb.com', 'bilivideo.com', 'bilivideo.cn', 'qpic.cn', 'qlogo.cn', 'xhscdn.com',
                'douyinpic.com', 'byteimg.com', 'twimg.com')
 
 
@@ -145,7 +145,7 @@ class Runtime:
                 self.state.release(platform, self.owner)
             entry['elapsed_ms'] = round((time.monotonic() - started) * 1000)
 
-    def command(self, argv, payload=None, paid=False, extra_env=None):
+    def command(self, argv, payload=None, paid=False, extra_env=None, timeout=None):
         if not argv or not isinstance(argv, list) or not all(isinstance(x, str) for x in argv):
             raise Failure('BAD_INPUT', '命令必须为字符串数组')
         exe = executable(argv[0])
@@ -170,7 +170,7 @@ class Runtime:
                 stdin.seek(0)
                 proc = subprocess.Popen([exe, *argv[1:]], stdin=stdin, stdout=stdout, stderr=stderr,
                                         cwd=directory, env=env, start_new_session=True)
-                stop_at = time.monotonic() + self.remaining()
+                stop_at = min(self.end, time.monotonic() + (self.remaining() if timeout is None else timeout))
                 try:
                     while proc.poll() is None:
                         if time.monotonic() > stop_at:
@@ -201,9 +201,9 @@ class Runtime:
             raise classify_text(err.decode('utf-8', 'replace') + text)
         return text
 
-    def command_json(self, argv, payload=None, paid=False):
+    def command_json(self, argv, payload=None, paid=False, timeout=None):
         try:
-            data = json.loads(self.command(argv, payload, paid))
+            data = json.loads(self.command(argv, payload, paid, timeout=timeout))
         except ValueError:
             raise Failure('INVALID_RESPONSE', '上游返回不是单个 JSON 对象') from None
         if not isinstance(data, dict):

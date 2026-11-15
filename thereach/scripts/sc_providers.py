@@ -110,6 +110,10 @@ class Providers:
         return result
 
     def reach(self, platform, action, target, limit):
+        if platform == 'xiaohongshu' and action in ('read', 'comments'):
+            token = parse_qs(urlsplit(target).query).get('xsec_token', [''])[0]
+            if not token.strip() or token == '[redacted]':
+                raise Failure('BAD_INPUT', '小红书正文/评论需要原始完整的带 xsec_token 链接；导出的 url 仅用于标识，已去掉签名。请使用原分享链接，或 search --enrich 1 在同次调用中读取；这不代表需要重新登录')
         requested_action = action
         channel = CHANNELS.get(platform, platform)
         if platform == 'x' and action in ('read', 'comments'):

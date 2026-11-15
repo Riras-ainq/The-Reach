@@ -5,6 +5,7 @@ import tempfile
 from sc_core import (Failure, STOP, TERMINAL, canonical, deduplicate, digest, input_url,
                      platform_for, short_link)
 from sc_providers import Providers
+from sc_native_asr import NativeASR
 
 
 class Collector:
@@ -13,6 +14,7 @@ class Collector:
         self.p = Providers(runtime, allow_paid)
         self.allow_paid, self.refresh = allow_paid, refresh
         self.cache_hits = 0
+        self.native = NativeASR(runtime, self.p, refresh)
 
     def operation(self, platform, action, target, limit=5):
         key = digest(['v2', platform, action, target, limit, self.c.get('youtube_api'),
@@ -41,7 +43,7 @@ class Collector:
                         raise Failure('EMPTY_CONTENT', '上游未返回内容')
                     for entry in rows:
                         entry['provenance'].append({'backend': name, 'action': action})
-                    self.r.state.record_check(platform, action, {'status': 'content_returned' if any(x.get('text') for x in rows) else 'empty_text',
+                    self.r.state.record_check(platform, action, {'status': 'hits_returned' if action == 'search' and rows else ('content_returned' if any(x.get('text') for x in rows) else 'empty_text'),
                         'backend': name, 'count': len(rows), 'text_chars': sum(len(x.get('text', '')) for x in rows),
                         'scope': sorted(set(x.get('text_scope', '') for x in rows)),
                         'urls': [canonical(x['url']) for x in rows[:3]]})
@@ -53,9 +55,12 @@ class Collector:
             except Failure as e:
                 failures.append(e.code)
                 self.r.state.record_check(platform, action, {'status': 'failed', 'backend': name, 'error': e.as_dict()})
+                if action == 'subtitle' and e.code == 'NOT_FOUND':
+                    self.r.state.save(key, {'failure': e.as_dict()}, self.c['failure_ttl'])
                 if e.code in STOP:
                     raise
-        failure = Failure(failures[-1] if failures else 'UNSUPPORTED', '所有允许路线失败：' + ', '.join(failures))
+                last_failure = e
+        failure = Failure(last_failure.code, last_failure.message + '；所有允许路线失败：' + ', '.join(failures), last_failure.retry_after)
         self.r.state.save(key, {'failure': failure.as_dict()}, self.c['failure_ttl'])
         raise failure
 
@@ -76,6 +81,7 @@ class Collector:
     def extract(self, text, subtitles=False, comments=False, transcribe=False, ocr=False, vision=False):
         url = self.resolve(input_url(text))
         platform = platform_for(url)
+        subtitles = subtitles or (transcribe and platform in ('bilibili', 'youtube'))
         rows = self.operation(platform, 'read', url)
         if not rows:
             raise Failure('EMPTY_CONTENT', '没有取得内容')
@@ -114,7 +120,12 @@ class Collector:
                 root['coverage']['transcript'] = 'skipped_subtitles_available'
             else:
                 try:
-                    root['transcript'] = self.transcribe(url, platform)
+                    result = self.transcribe(url, platform)
+                    root['transcript'] = result['text'] if isinstance(result, dict) else result
+                    if isinstance(result, dict):
+                        root['transcript_segments'] = result.get('segments', [])
+                        root['transcript_details'] = {k: v for k, v in result.items() if k not in ('text', 'segments', 'ok')}
+                        root['provenance'].append({'backend': result['engine'], 'action': 'transcribe', 'scope': 'asr'})
                     root['coverage']['transcript'] = 'available'
                 except Failure as e:
                     root['coverage']['transcript'] = e.code
@@ -135,6 +146,10 @@ class Collector:
 
     def transcribe(self, target, platform):
         spec = self.c.get('transcribe_command')
+        if not spec and platform in ('bilibili', 'local'):
+            return self.native.transcribe(target, platform)
+        if not spec and platform != 'youtube':
+            raise Failure('NEED_SETUP', '未配置 transcribe_command，当前平台不能直接转写；仅授权额度不会启用转写服务')
         with self.r.attempt(platform, 'configured-asr' if spec else 'agent-reach', 'transcribe'):
             if not self.allow_paid:
                 raise Failure('NEED_SETUP', '转录默认可能上传素材并消耗模型额度；需 --allow-paid')
@@ -244,7 +259,7 @@ class Collector:
             return evidence
 
     def metrics(self):
-        return {**self.r.metrics(), 'cache_hits': self.cache_hits}
+        return {**self.r.metrics(), 'cache_hits': self.cache_hits + self.native.cache_hits}
 
 
 def public_result(value):
